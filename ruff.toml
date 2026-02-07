@@ -1,0 +1,16 @@
+line-length = 100
+target-version = "py311"
+
+[lint]
+select = [
+  "E", "F", "I",  # pycodestyle errors, pyflakes, import sorting
+  "B",            # bugbear
+  "UP",           # pyupgrade
+]
+ignore = [
+  "E501",         # let formatter handle line length
+]
+
+[format]
+quote-style = "double"
+indent-style = "space"
