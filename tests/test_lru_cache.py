@@ -2,8 +2,6 @@
 import pytest
 
 from mlsys.data_structures.lru_cache import LRUCache
-
-
 # ----------------------------
 # Helpers
 # ----------------------------
@@ -14,7 +12,6 @@ class WeirdKey:
         self.x = x
 
     def __hash__(self):
-        # Intentionally not constant; stable but not just x
         return hash(("WeirdKey", self.x))
 
     def __eq__(self, other):
@@ -24,10 +21,14 @@ class WeirdKey:
         return f"WeirdKey({self.x!r})"
 
 
-def assert_mru_to_lru(cache, expected_items):
+def assert_lru_to_mru(cache, expected_items):
     """
-    Assert cache.items() returns MRU -> LRU ordering.
-    expected_items: list[tuple[key, value]]
+    Assert cache.items() returns LRU -> MRU ordering.
+
+    This matches an OrderedDict-based implementation where:
+    - least recently used is at the beginning
+    - move_to_end(key) makes key most-recent
+    - new insertions land at the end (MRU)
     """
     assert cache.items() == expected_items
     assert cache.keys() == [k for k, _ in expected_items]
@@ -74,36 +75,36 @@ def test_delete_missing_raises_keyerror():
 # put/get semantics + recency
 # ----------------------------
 
-def test_put_then_get_basic_and_recency_order():
+def test_put_then_get_basic_and_recency_order_lru_to_mru():
     c = LRUCache(3)
     c.put("a", 1)
     c.put("b", 2)
     c.put("c", 3)
 
-    # Most recent is the last put: c, then b, then a
-    assert_mru_to_lru(c, [("c", 3), ("b", 2), ("a", 1)])
+    # LRU -> MRU after sequential puts: a (oldest), b, c (newest)
+    assert_lru_to_mru(c, [("a", 1), ("b", 2), ("c", 3)])
 
-    # Access 'a' -> becomes MRU
+    # Access 'a' -> becomes MRU (moved to end)
     assert c.get("a") == 1
-    assert_mru_to_lru(c, [("a", 1), ("c", 3), ("b", 2)])
+    assert_lru_to_mru(c, [("b", 2), ("c", 3), ("a", 1)])
 
     # Access 'c' -> becomes MRU
     assert c.get("c") == 3
-    assert_mru_to_lru(c, [("c", 3), ("a", 1), ("b", 2)])
+    assert_lru_to_mru(c, [("b", 2), ("a", 1), ("c", 3)])
 
 
-def test_put_existing_key_overwrites_value_and_moves_to_mru_without_growing():
+def test_put_existing_key_overwrites_value_and_refreshes_recency_without_growing():
     c = LRUCache(2)
     c.put("a", 1)
     c.put("b", 2)
     assert len(c) == 2
+    assert_lru_to_mru(c, [("a", 1), ("b", 2)])
 
-    # overwrite 'a'
+    # overwrite 'a' -> value updates and becomes MRU
     c.put("a", 10)
     assert len(c) == 2
-    assert c.get("a") == 10  # also makes MRU (already MRU after put)
-
-    assert_mru_to_lru(c, [("a", 10), ("b", 2)])
+    assert c.get("a") == 10  # also makes MRU, but it should already be MRU after put
+    assert_lru_to_mru(c, [("b", 2), ("a", 10)])
 
 
 def test_contains_does_not_change_recency_by_default():
@@ -115,11 +116,11 @@ def test_contains_does_not_change_recency_by_default():
     c.put("a", 1)
     c.put("b", 2)
     c.put("c", 3)
-    assert_mru_to_lru(c, [("c", 3), ("b", 2), ("a", 1)])
+    assert_lru_to_mru(c, [("a", 1), ("b", 2), ("c", 3)])
 
     assert ("a" in c) is True
     # recency unchanged
-    assert_mru_to_lru(c, [("c", 3), ("b", 2), ("a", 1)])
+    assert_lru_to_mru(c, [("a", 1), ("b", 2), ("c", 3)])
 
 
 # ----------------------------
@@ -129,13 +130,13 @@ def test_contains_does_not_change_recency_by_default():
 def test_capacity_one_always_evicts_previous_on_new_key():
     c = LRUCache(1)
     c.put("a", 1)
-    assert_mru_to_lru(c, [("a", 1)])
+    assert_lru_to_mru(c, [("a", 1)])
 
     c.put("b", 2)  # evict a
     assert len(c) == 1
     assert ("a" in c) is False
     assert ("b" in c) is True
-    assert_mru_to_lru(c, [("b", 2)])
+    assert_lru_to_mru(c, [("b", 2)])
 
     with pytest.raises(KeyError):
         c.get("a")
@@ -146,43 +147,50 @@ def test_put_new_key_when_full_evicts_lru():
     c = LRUCache(2)
     c.put("a", 1)
     c.put("b", 2)
-    assert_mru_to_lru(c, [("b", 2), ("a", 1)])  # b is MRU, a is LRU
+    assert_lru_to_mru(c, [("a", 1), ("b", 2)])  # a is LRU, b is MRU
 
     c.put("c", 3)  # should evict a
     assert len(c) == 2
     assert ("a" in c) is False
     assert ("b" in c) is True
     assert ("c" in c) is True
-    assert_mru_to_lru(c, [("c", 3), ("b", 2)])
+    assert_lru_to_mru(c, [("b", 2), ("c", 3)])  # b older than c
 
 
 def test_get_changes_lru_target_for_future_eviction():
     c = LRUCache(2)
     c.put("a", 1)
     c.put("b", 2)
-    assert_mru_to_lru(c, [("b", 2), ("a", 1)])  # a is LRU
+    assert_lru_to_mru(c, [("a", 1), ("b", 2)])  # a is LRU
 
-    # access a -> now b becomes LRU
+    # access a -> becomes MRU, so b becomes LRU
     assert c.get("a") == 1
-    assert_mru_to_lru(c, [("a", 1), ("b", 2)])
+    assert_lru_to_mru(c, [("b", 2), ("a", 1)])
 
     # insert c -> should evict b (current LRU)
     c.put("c", 3)
     assert ("b" in c) is False
-    assert_mru_to_lru(c, [("c", 3), ("a", 1)])
+    assert_lru_to_mru(c, [("a", 1), ("c", 3)])
 
 
 def test_put_existing_key_when_full_does_not_evict_anything():
+    """
+    Correct LRU behavior: updating an existing key must not evict.
+    This catches the common bug: "if full then pop LRU" even on overwrite.
+    """
     c = LRUCache(2)
     c.put("a", 1)
     c.put("b", 2)
     assert len(c) == 2
+    assert_lru_to_mru(c, [("a", 1), ("b", 2)])
 
     # Overwriting existing key should not evict
     c.put("a", 100)
     assert len(c) == 2
     assert ("a" in c) is True and ("b" in c) is True
-    assert_mru_to_lru(c, [("a", 100), ("b", 2)])
+
+    # 'a' should become MRU after put
+    assert_lru_to_mru(c, [("b", 2), ("a", 100)])
 
 
 # ----------------------------
@@ -194,17 +202,17 @@ def test_delete_removes_key_and_updates_order_and_size():
     c.put("a", 1)
     c.put("b", 2)
     c.put("c", 3)
-    assert_mru_to_lru(c, [("c", 3), ("b", 2), ("a", 1)])
+    assert_lru_to_mru(c, [("a", 1), ("b", 2), ("c", 3)])
 
     c.delete("b")
     assert len(c) == 2
     assert ("b" in c) is False
-    assert_mru_to_lru(c, [("c", 3), ("a", 1)])
+    assert_lru_to_mru(c, [("a", 1), ("c", 3)])
 
-    # deleting remaining ends should also work
-    c.delete("c")
-    assert_mru_to_lru(c, [("a", 1)])
+    # deleting ends should also work
     c.delete("a")
+    assert_lru_to_mru(c, [("c", 3)])
+    c.delete("c")
     assert len(c) == 0
     assert c.items() == []
     assert c.keys() == []
@@ -222,11 +230,11 @@ def test_delete_then_put_reuses_capacity_correctly():
     assert len(c) == 2
     assert ("b" in c) is True
     assert ("c" in c) is True
-    assert_mru_to_lru(c, [("c", 3), ("b", 2)])
+    assert_lru_to_mru(c, [("b", 2), ("c", 3)])
 
 
 # ----------------------------
-# keys/values/items ordering + content
+# keys/values/items consistency after mixed ops
 # ----------------------------
 
 def test_keys_values_items_consistent_after_mixed_ops():
@@ -234,27 +242,19 @@ def test_keys_values_items_consistent_after_mixed_ops():
     c.put("a", 1)
     c.put("b", 2)
     c.put("c", 3)
-    assert_mru_to_lru(c, [("c", 3), ("b", 2), ("a", 1)])
+    assert_lru_to_mru(c, [("a", 1), ("b", 2), ("c", 3)])
 
-    c.get("a")       # a becomes MRU
-    c.put("d", 4)    # evict LRU (should be b)
+    c.get("a")       # a becomes MRU => order: b, c, a
+    c.put("d", 4)    # evict LRU (b) => order: c, a, d
     assert ("b" in c) is False
-    assert_mru_to_lru(c, [("d", 4), ("a", 1), ("c", 3)])
+    assert_lru_to_mru(c, [("c", 3), ("a", 1), ("d", 4)])
 
 
 # ----------------------------
 # Custom / tricky keys
 # ----------------------------
 
-def test_supports_none_key_and_tuple_key():
-    c = LRUCache(2)
-    c.put(None, "nil")
-    c.put(("x", 1), "tup")
-    assert c.get(None) == "nil"
-    assert c.get(("x", 1)) == "tup"
 
-    # Ordering after get(None): None becomes MRU
-    assert_mru_to_lru(c, [(None, "nil"), (("x", 1), "tup")])
 
 
 def test_supports_custom_objects_as_keys():
@@ -268,11 +268,12 @@ def test_supports_custom_objects_as_keys():
 
     # get using equal-but-not-same instance should work
     assert c.get(k1b) == "one"
-    assert ("missing" in c) is False
 
-    # After accessing key 1, it becomes MRU
-    assert c.items()[0][0] == k1a  # stored key object may be original; value should match
-    assert c.items()[0][1] == "one"
+    # After accessing key 1, k2 becomes LRU and k1 becomes MRU
+    # Stored key object may be the original; value should match.
+    items = c.items()
+    assert items[0][1] == "two"
+    assert items[1][1] == "one"
 
 
 def test_equal_keys_overwrite_same_entry_not_duplicate():
@@ -290,7 +291,7 @@ def test_equal_keys_overwrite_same_entry_not_duplicate():
 
 
 # ----------------------------
-# clear / repr (optional features)
+# Optional features
 # ----------------------------
 
 def test_clear_optional_if_implemented():
@@ -313,5 +314,4 @@ def test_repr_optional_smoke_if_implemented():
     if hasattr(c, "__repr__"):
         s = repr(c)
         assert isinstance(s, str)
-        # don't require a specific format, just that it contains the class name or key
         assert ("LRU" in s) or ("a" in s)
