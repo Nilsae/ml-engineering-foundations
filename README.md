@@ -1,1 +1,2 @@
 run  python3 -m drills.solutions.hashmap_demo
+run pytest
